@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 """Functions for the processing of OSCAR airbone data."""
 import os
+import importlib.util
 import numpy as np
 from seastar.utils.readers import readNetCDFFile
 from seastar.utils.tools import list_duplicates
 from scipy import interpolate
 import xarray as xr
+from datetime import datetime as dt
+
+from _version import __version__
 
 
 def load_OSCAR_data(file_path, file_inds):
@@ -189,3 +193,153 @@ def colocate_variable_lat_lon(data_in, latitude, longitude, ds_out):
                         coords=ds_out.coords
                         )
     return colocated_var
+
+
+
+def formatting_data(
+    ds, processing_level, data_version, start_time, end_time, date_filename, resolution, track, 
+    L2_processor=None, Kp=None, RSVNoise=None, gmf =None, platform="OSCAR", campaign="202305_MedSea"):
+    """
+    Formatting the attributes and the file name of the processed data from level 1B to level 2 included.
+    
+    Parameters
+    ----------
+    ds : `xr.DataArray`
+       dataset to format and to save as a NetCDF file.
+    processing_level : `str`
+        The processing level (e.g., "L1B", "L1C", "L2").
+    version_file : `str`
+        The path to the version file _version.py in the project.
+    data_version : `str`
+        The version of the MetaSensing data. Corresponding to the ftp deposite date.
+    start_time : `str`
+        The starting acquisition time.
+    end_time : `str`
+        The ending acquisition time.
+    date_filename : `str`
+        The init and final time of the acquisition with the date.
+    resolution : `int`
+        The pixel resolution of the OSCAR data.
+    track : `str`
+        The Track number formatted as Track_01.
+    L2_processor : `str`, optional
+        Processor used for L2 processing. Can be PWP (PenWP) or FWC (Full Wind Current) (default is None.
+    Kp : `float`, optional
+        The Kp parameter, required for L2 (default is None.
+    RSVNoise : `float`, optional
+        The RSV noise parameter, optional for L2 (default is None.
+    gmf : `str`, optional
+        The Geophysical Model Function (GMF) name, required for L2. Can be mouche12 or yurovsky19 (default is None.
+    platform : `str`, optional
+        The platform name (default is "OSCAR").       
+    campaign : `str`, optional
+        The campaign name (default is "202305_MedSea").  
+            
+    Returns
+    ----------
+    ds : xr.Dataset
+        The dataset with updated metadata.
+    filename : `str`
+        Name of the OSCAR NetCDF file.
+    """
+    
+    # Check if ds is a valid xarray Dataset
+    if not isinstance(ds, xr.Dataset):
+        raise TypeError("Input 'ds' must be an xarray.Dataset.")
+
+    # Ensure processing_level is valid
+    valid_levels = {"L1B", "L1C", "L2"}
+    if processing_level not in valid_levels:
+        raise ValueError(f"Invalid processing level: {processing_level}. Must be one of {valid_levels}.")
+    
+    # Format resolution properly for metadata
+    resolution_str = str(resolution).zfill(3)+"x"+str(resolution).zfill(3)+"m" 
+    
+    # Define general attributes
+    metadata = {
+        "Campaign": campaign,
+        "Platform": platform,
+        "Track": track,
+        "StartTime": start_time,
+        "EndTime": end_time,
+        "ProcessingLevel": processing_level,
+        "Resolution": resolution_str,
+        "Codebase": "seastar_project",
+        "Repository": "https://github.com/NOC-EO/seastar_project",
+        "SoftwareVersion": __version__,
+        "DataVersion": data_version,
+        "Comments": f"Processed on {dt.today().strftime('%Y%m%d')}",
+    }
+
+    # Add L2-specific attributes
+    if processing_level == "L2":
+        
+        # Ensure L2 processor is valid
+        valid_L2_processor = {"PWP", "FCW"}
+        if L2_processor not in valid_L2_processor:
+            raise ValueError(f"Invalid L2 processor: {L2_processor}. Must be one of {valid_L2_processor}.")
+        
+        # Ensure GMF is valid
+        valid_gmf = {"mouche12", "yurovsky19"}
+        if gmf not in valid_gmf:
+            raise ValueError(f"Invalid GMF: {gmf}. Must be one of {valid_gmf}.")
+        
+        # Ensure required L2 values are not None
+        if any(var is None for var in [Kp, RSVNoise, L2_processor, gmf]):
+            raise ValueError("Kp, RSVNoise, L2_processor, and gmf are required for processing level L2.")
+    
+        metadata.update({
+            "Kp": Kp,
+            "RSV_noise": RSVNoise,
+            "L2_Processor": L2_processor,
+            "GMF": gmf,
+        })
+
+        # Assign attributes to dataset
+        ds.attrs.update(metadata)
+
+   # Construct the filename
+    filename_parts = [
+        date_filename,  # Already formatted as per your logic
+        platform,
+        processing_level,
+        track,
+        resolution_str,
+        L2_processor if L2_processor else "",  # Only for L2
+        gmf if gmf else "",  # Only for L2
+        f"Kp{Kp}" if Kp else "",  # Only for L2
+        f"RSV{RSVNoise}" if RSVNoise else "",  # Only for L2
+        __version__,
+    ]
+
+    filename = "_".join(filter(None, filename_parts)) + ".nc"
+
+
+    return ds, filename
+
+
+def extract_acquisition_date(ds):
+    """
+    Extract the starting and ending datetime as well as the date and time acquisition to the good format to be reported in the filename of processed data.
+    
+    Parameters
+    ----------
+    ds : `xr.DataArray`
+       The L1ap dataset that contains date and time information.
+    
+    Returns
+    ----------
+    start_date : `str`
+        The starting acquisition time.
+    end_date : `str`
+        The ending acquisition time.
+    date_time_filename : `str`
+        The date and time as it will appear in the post-processed data file name.
+    """
+    
+    start_date = ds.Title.split()[2]
+    end_date = ds.Title.split()[2].split("T")[0] + "T" + str(int(ds.FinalHour.data)).zfill(2)+str(int(ds.FinalMin.data)).zfill(2)+str(int(ds.FinalSec.data)).zfill(2)
+    date_time_filename = ds.Title.split()[2] + "-" + str(int(ds.FinalHour.data)).zfill(2)+str(int(ds.FinalMin.data)).zfill(2)+str(int(ds.FinalSec.data)).zfill(2)
+    
+    
+    return start_date, end_date, date_time_filename
